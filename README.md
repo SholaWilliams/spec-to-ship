@@ -7,7 +7,7 @@ It exists for one reason: agents that "just start coding" produce code nobody sp
 ## Install
 
 ```bash
-npx skills add <your-github-owner>/spec-to-ship
+npx skills add SholaWilliams/spec-to-ship
 ```
 
 Or manually: copy this folder to `~/.claude/skills/spec-to-ship/`.
