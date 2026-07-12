@@ -18,6 +18,8 @@ This skill orchestrates; these sharpen specific steps. Before each use, check th
 
 **Preflight install (first action of either mode):** compare this table against the available-skills list. If any are missing, offer to install them once, in a single batch, using each row's Source — then continue. If the user declines or install isn't possible, do the step yourself and move on. Never vendor copies of these skills into this one: they update independently, and a bundled copy is a stale fork by next month.
 
+*If the preflight check itself cannot determine whether a skill is installed (no programmatic skill list, permission error, etc.), skip the check silently for that skill — do not block the milestone.* If an install command fails, catch the error and immediately fall back to doing the step yourself; do not retry the install.
+
 | Skill | Source | Where in the flow | What it adds |
 |---|---|---|---|
 | `find-skills` | `npx skills add find-skills` ([skills.sh](https://skills.sh/)) | Bootstrap step 1; Execute step 3 (Plan) | Search the skills ecosystem before hand-rolling a capability a battle-tested skill already covers |
@@ -52,6 +54,7 @@ Goal: produce just enough documentation that a fresh session (or a cheaper model
    - What are the contracts that must not silently change (persisted files, schemas, APIs, CLI flags)?
    - What are the quality gates ("done" = which tests, lint, boot check)? Any live/paid tests to never run?
    - Any known landmines, ⚠️ perishable facts (model IDs, endpoints), hardware/keys constraints?
+   - *Headless fallback (no user available):* If the interview cannot happen, produce a minimal doc skeleton with `<!-- TODO(interview) -->` markers in place of answers, then write a PARKED memory-log entry explaining what's missing. Do not invent answers.
 3. **Compose the doc-generation brief.** Distill the repo map (step 1) + interview answers (step 2) into a single brief that will drive the doc writing: project purpose, audience, scope, binding decisions, contracts, gates, landmines, and the perspective rule. If `prompt-master` is installed, invoke it to optimize this brief as a prompt; either way, save the result to `docs/ai/BOOTSTRAP_BRIEF.md` so the doc set is reproducible and auditable, then write the docs *from the brief*.
 4. **Write the doc set** (small, numbered, each with a one-line purpose header). **Conventions rule:** if the repo already has doc conventions — a different docs layout, ADRs, a differently-named memory/changelog file, its own task-ID scheme — adopt those and map the roles below onto them; never restructure existing docs to match this list. The layout below is the *default for greenfield repos only*:
    - `AGENTS.md` — briefing: reading order, unbreakable rules, verification commands. (`CLAUDE.md` points to it.)
@@ -60,11 +63,12 @@ Goal: produce just enough documentation that a fresh session (or a cheaper model
    - `docs/04-technology-decisions.md` (or equivalent) — accepted and **rejected** dependencies with reasons (skills found in step 1 count as accepted technology).
    - `docs/ai/MEMORY.md` — memory log seeded with a "Current state" entry.
    - For an existing codebase, docs describe reality first (as-built), then the plan; flag any place code contradicts stated intent.
+   - If `README.md` and `CONTRIBUTING.md` are missing or outdated, update them to reflect the new doc set — at minimum, add the short setup section described in "Scaling to a team".
 5. **Review gate.** Present the doc set; the user approves or edits. Do not start M1 until approved. Docs are commit-worthy (`docs/<area>-<short>` branch, Conventional Commits) when the user says so. Once approved and committed, if graphify is installed, run `/graphify .` on the repo so the doc set is semantically searchable before M1 starts (Resilience §3).
 
 ## Token discipline (this skill must be cheap to run)
 
-A milestone must NOT burn a whole context window on reading. Rules:
+The spec is designed to keep reading costs low; if a doc turns out to be unexpectedly large or densely interlinked, note it to the user and accept the cost, or ask for the doc to be split. Rules:
 
 - **Read sections, not documents.** Use the doc map / table of contents to pull only the sections the phase doc cites. Never read a full spec "for background".
 - **Memory log: newest entries only.** Read the "Current state" section and the decision entries touching this milestone's subsystem; skip the rest.
@@ -72,33 +76,82 @@ A milestone must NOT burn a whole context window on reading. Rules:
 - **Don't re-read files already in context.** Quote only the lines that matter.
 - **One milestone per session** (Bootstrap counts as a milestone). The memory-log entry (step 8) is the handoff — it must let a fresh session (or `/clear`) resume without re-reading history.
 - **Companion skills are surgical, not ambient.** Invoke each at its designated step only; don't run ponytail-review or code-review more than once per milestone.
-- **Model mix:** bootstrap + planning (steps 1–3) benefit from the strongest model; implementation (steps 4–7) runs fine on Sonnet because the plan + docs + gates carry the quality. Suggest the switch at the plan/build boundary if the user controls the model.
+- **Model routing:** follow the Model selection section below — cheap models for high-volume mechanical work (via subagents), the strongest model where decisions are made, and a suggested main-model switch at the plan/build boundary.
+
+## Model selection — right model for the right task
+
+If the session model is already the cheapest tier available (e.g., Haiku on a headless CI run), skip this section — subagents inherit it and no routing is needed.
+
+Two levers exist, and they differ in who controls them:
+
+- **The main session model is the user's choice — never switch it silently.** Suggest a switch at most twice, at the natural boundaries: after plan approval ("Sonnet-class is enough from here; the plan, docs, and gates carry the quality") and at handover ("the next milestone's planning benefits from the strongest model"). One suggestion each, then drop it; skip silently when headless (Failure paths §"No user available").
+- **Subagent models are this skill's choice.** Whenever a subagent is spawned (Agent tool), set `model` explicitly per the routing table — don't let mechanical work inherit an expensive session model by default.
+
+**Spawn only when a spawn pays for itself.** A subagent starts cold and re-derives context, so route work to one only when *input volume* is the problem: fan-out reading across many files, a broad search, or triaging long logs. A small task is cheaper done inline on the session model than spawned on a cheap one.
+
+| Work | Where in the flow | Route to | Why |
+|---|---|---|---|
+| Repo mapping, doc inventory, broad code/convention search | Bootstrap 1; Execute 1 on large repos | Explore subagent, `model: haiku` | High read volume, zero decisions — the conclusion travels back, the file dumps don't |
+| ⚠️ perishable-fact checks (model IDs, package viability, endpoints) | Execute 2 | Subagent `model: sonnet`, or inline | Retrieval plus a viability judgment — haiku misjudges, opus is wasted on a lookup |
+| Long test/log output triage (extract failures only) | Execute 6 | Subagent `model: haiku` | Mechanical extraction, and the gates themselves re-verify the result |
+| Ecosystem skill search (if find-skills unavailable) | Execute 3 (Buy-before-build) | Subagent `model: haiku` for collection, then judge inline | Mechanical collection of candidates; viability judgment stays on the main session |
+| Planning, drift resolution, doc/brief writing, interview synthesis, roadmap edits | Bootstrap 2–4; Execute 1–3, 8 | Main session, strongest available | These outputs are the contract everything downstream runs on — never delegate down |
+| Implementation + targeted tests | Execute 4–7 | Main session; Sonnet-class sufficient | Plan + docs + gates carry the quality; this is the suggested-switch boundary |
+| Reviews (`ponytail-review`, `/code-review`, `/security-review`) | Execute 6, 9 | However the review skill runs them | Don't override a review skill's own model/effort choices |
+
+Guardrails:
+
+- **Haiku only where output is mechanical or independently re-verified** — a gate re-checks it, or it returns pointers (file:line) you read yourself. Anything that becomes a doc statement, a plan step, or code goes through Sonnet-class or better.
+- **Route down, never up.** Routing exists to step *down* from an expensive session for cheap work. If the session is already on a small model (headless/CI on Sonnet or Haiku), subagents inherit — spawning a stronger model than the user chose is spend they didn't agree to; note the constraint in the handover instead.
+- **Subagent prompts are self-contained and return only what's needed.** State the question, the exact paths to look at, and the shape of the response required — for example: *"file:line + one-line finding"* for a triage, *"yes/no + one reason"* for a viability check. Keep the expected response minimal to reduce token cost; the subagent should not regurgitate file contents.
+- **Use harness model aliases (`haiku`, `sonnet`, `opus`), never dated model IDs** — dated IDs are ⚠️ perishable facts, and this skill's own rule applies to itself.
 
 ## Resilience — checkpoints, limit awareness, live graph
 
 Sessions can die without warning (the 5-hour usage window, a crash, a closed laptop). The rule: **the on-disk state must always be resumable by a fresh session — or a different agent/provider entirely.** All artifacts (docs, memory log, git) are plain markdown + commits; nothing here is Claude-specific.
 
-1. **Checkpoint after every task, not just at milestone end.** After each task's commit, update a single `## Checkpoint` block at the top of the memory log: milestone id, branch, tasks done, task in progress, exact next action, anything not yet verified. Overwrite it each time (it's a scratch slot, not history); the full step-8 entry replaces it at milestone end. A hard cutoff then costs at most one task.
+1. **Checkpoint after every task, not just at milestone end.** After each task's commit, update a single `## Checkpoint` block at the top of the memory log: milestone id, branch, last commit hash, tasks done, task in progress, exact next action, anything not yet verified. Overwrite it each time (it's a scratch slot, not history); the full step-8 entry replaces it at milestone end. A hard cutoff then costs at most one task.
 2. **Usage-window check** (only applies on plans with a rolling usage window, e.g. Claude Code Pro/Max 5-hour blocks — skip silently on API/pay-per-token setups). The model cannot see the limit directly (`/usage` is a terminal dialog). Instead, at milestone kickoff and again every 2–3 tasks, run `npx -y ccusage@latest blocks --active --json` — it reads the local Claude Code transcripts (no key, no network beyond npx) and reports the active block's `endTime`. If less than ~30 minutes remain, stop implementing and run the PARKED path *now*, while there's budget to write it. Treat the numbers as a heuristic (ccusage infers blocks from timestamps); if the command is unavailable or errors, fall back to asking the user at kickoff how much window remains; if the user isn't available either, skip the check entirely — the checkpoint discipline in §1 is what actually makes a cutoff cheap, and it applies on every setup, window or not. Honor "park it" at any moment.
-3. **Auto-graphify rides the checkpoints.** If the `graphify` skill is installed: when `graphify-out/` doesn't exist yet, build it once at the earliest useful moment — right after Bootstrap doc approval (graph the doc set) or at Execute step 1 on an existing repo — so semantic search exists from day one. Then keep it live automatically: at step 4 (branch), install graphify's post-commit auto-rebuild hook (graphify `references/hooks.md`) so every checkpoint commit refreshes the graph; if the hook can't be installed, run `/graphify <root> --update` after every 2–3 task commits instead. If graphify isn't installed, skip silently — it's an accelerator, not a gate.
+3. **Auto-graphify rides the checkpoints.** If the `graphify` skill is installed: when `graphify-out/` doesn't exist yet, build it once at the earliest useful moment — right after Bootstrap doc approval (graph the doc set) or at Execute step 1 on an existing repo — so semantic search exists from day one. Then keep it live automatically: at step 4 (branch), install graphify's post-commit auto-rebuild hook (graphify `references/hooks.md`) so every checkpoint commit refreshes the graph; if the hook can't be installed, run `/graphify <root> --update` after every 2–3 task commits instead. *If the hook is installed but later appears to fail (stale query results, error on a manual update), log a warning in the checkpoint block and attempt a manual `/graphify <root> --update` at milestone end; note any staleness in the memory log.* If graphify isn't installed, skip silently — it's an accelerator, not a gate.
 
 ## Steps (Execute mode)
 
-1. **Orient.** Run the companion-skill preflight and the kickoff usage-window check (Resilience §2); if a `## Checkpoint` block sits atop the memory log, resume from it instead of re-planning. Then read briefing → memory log (per token discipline) → roadmap entry for this milestone → phase doc sections it cites. Extract: task list (T-numbers / action items), definition of done, binding decisions (D-numbers, TD-numbers), contracts that must not change, and any ⚠️ verify-at-implementation items. If the roadmap or this milestone's phase spec is missing → Bootstrap mode (per Inputs; a missing briefing alone is not). **Drift check:** if the phase doc contradicts the actual code, stop and surface it — the doc gets corrected (with the user) before code follows it. **Size check:** if the milestone clearly won't fit one session, propose a split in the roadmap before starting.
+1. **Orient.** Run the companion-skill preflight and the kickoff usage-window check (Resilience §2); if a `## Checkpoint` block sits atop the memory log, resume from it instead of re-planning. **Size check first:** scan the task list for this milestone (from roadmap or phase doc) — if it clearly won't fit one session, propose a split in the roadmap before investing a deep read. Then read briefing → memory log (per token discipline) → roadmap entry for this milestone → phase doc sections it cites. Extract: task list (T-numbers / action items), definition of done, binding decisions (D-numbers, TD-numbers), contracts that must not change, and any ⚠️ verify-at-implementation items. If the roadmap or this milestone's phase spec is missing → Bootstrap mode (per Inputs; a missing briefing alone is not). **Drift check:** if the phase doc contradicts the actual code, stop and surface it — the doc gets corrected (with the user) before code follows it.
 2. **Verify ⚠️ items first.** Model IDs, package viability, external endpoints — check them for real (web search / trial install) before building on them; update the doc with findings.
-3. **Plan.** Produce a task-ordered plan mapping each task to files. **Buy-before-build:** if a task is a common capability (document generation, spreadsheet work, scraping, charts…), and `find-skills` is installed, search for an existing skill first — installing a vetted skill beats hand-rolling, but it goes through the technology-decisions doc like any dependency. Anything touching a persisted format or documented contract = versioning + migration, never edit-in-place. A task with no doc section = write the doc section first, same branch. Get plan approval if the harness supports plan mode or the project requires review gates.
+3. **Plan.** Produce a task-ordered plan mapping each task to files. **Buy-before-build:** if a task is a common capability (document generation, spreadsheet work, scraping, charts…), and `find-skills` is installed, invoke it to search for an existing skill. If `find-skills` is not installed, spawn a haiku subagent to collect candidate packages, then judge viability yourself. Installing a vetted skill beats hand-rolling, but it goes through the technology-decisions doc like any dependency. Anything touching a persisted format or documented contract = versioning + migration, never edit-in-place. A task with no doc section = write the doc section first, same branch. Get plan approval if the harness supports plan mode or the project requires review gates.
 4. **Branch.** `<type>/<milestone>-<short>` (e.g. `feat/m5-memory`), Conventional Commits, one coherent commit per task or task-group. If graphify is installed, set up the post-commit auto-rebuild hook here (Resilience §3).
 5. **Implement task-by-task.** After each task: commit, update the `## Checkpoint` block, and every 2–3 tasks re-run the usage check (Resilience §1–2). If `ponytail` is installed, activate it for the implementation work — simplest solution that passes the gates, stdlib before dependencies, no speculative abstraction; the phase doc defines *what*, ponytail keeps the *how* minimal. Tests alongside code. New dependency? Check the project's technology-decisions doc first — rejected libraries stay rejected; otherwise ask.
-6. **Run every quality gate** the project defines (look in AGENTS.md/CLAUDE.md/CI workflow). If it defines none, run the closest smoke check (build + boot) and record "no gates" as a doc gap in the memory log. All green or say exactly what's red. Never run live/network-key test markers unless the user asks. Then two diff reviews on the milestone's changes: **`ponytail-review`** (over-engineering — apply deletions that don't change behavior), and **`/security-review`** *if* the milestone touched input parsing, auth, secrets, file/network I/O, or anything user-facing (ponytail is minimalism, not security — don't conflate them).
-7. **Boot the real thing.** Run the actual app (offscreen/screenshot for GUI, real invocation for CLI/API) and exercise the milestone's feature. Tests passing is not verification.
-8. **Record.** Append to the memory log: what changed, decisions made **with why**, gotchas, and — critically — an explicit **"Not verified"** list (no hardware, no keys, never heard/seen it live). If implementation diverged from the phase doc, update the doc too (what/why level) — docs and code must not drift apart. Prune superseded entries, and delete the `## Checkpoint` block — this full entry replaces it.
+6. **Run every quality gate** the project defines (look in AGENTS.md/CLAUDE.md/CI workflow). If it defines none, run the closest smoke check (build + boot) and record "no gates" as a doc gap in the memory log. All green or say exactly what's red. Never run live/network-key test markers unless the user asks. Then two diff reviews on the milestone's changes:
+   - **`ponytail-review`** — over-engineering review. Apply deletions that don't change behavior. *After applying deletions, re-run the unit tests and boot check for the affected area; if any fail, revert the deletions and note the conflict in the memory log.*
+   - **`/security-review`** — *if* the milestone touched input parsing, auth, secrets, file/network I/O, or anything user-facing (ponytail is minimalism, not security — don't conflate them).
+7. **Boot the real thing.** Run the actual app and exercise the milestone's feature. Tests passing is not verification.
+   - *GUI apps:* if the app requires a display, GUI automation, or external keys not available, do not hang; record the feature as **"not verified – requires manual GUI check"** and move on.
+   - *CLI/API:* invoke the real binary/endpoint with a representative input; screenshot or capture output as evidence.
+8. **Record.** Append to the memory log using the template below. Capture what changed, decisions made **with why**, gotchas, and — critically — an explicit **"Not verified"** list (no hardware, no keys, never heard/seen it live). If implementation diverged from the phase doc, update the doc too (what/why level) — docs and code must not drift apart. Prune superseded entries, and delete the `## Checkpoint` block — this full entry replaces it.
+
+   **Memory-log entry template:**
+   ```markdown
+   ## Milestone [id] — [short name] — [date]
+   **Branch:** `<branch>`
+   **Status:** Complete / PARKED
+   ### What changed
+   - [high-level summary of the work done]
+   ### Decisions (with why)
+   - [decision] — [rationale, link to D-number or ADR if applicable]
+   ### Gotchas
+   - [anything that surprised you, ⚠️ facts confirmed/updated]
+   ### Not verified
+   - [item] — [reason: no hardware, no keys, manual GUI check required, etc.]
+   ### Notes for next milestone
+   - [dependencies left, known follow-ups, open questions]
+   ```
 9. **Stop at the review gate — the handover.** Optionally run `/code-review` on the branch diff first and fix confirmed findings. Present: tasks done, gates status, review findings handled, what was verified vs. not, the branch name, and anything the dev must do that the agent can't (deploy, rotate keys, hardware tests). Do **not** open the PR, merge, deploy, or start the next milestone unless asked. Deployment is the dev's; the skill's job ends at a review-ready branch.
 
 ## Failure and rework paths
 
 - **Parked milestone.** If a gate is red and unfixable in-session, discovery invalidates the plan, or context is running out: stop implementing, commit what's coherent, and write a memory-log entry marked **PARKED** — done tasks, remaining tasks, the blocker, and the exact next action. Present it honestly; never pad a partial milestone to look review-ready.
-- **Rework after review.** Review feedback returns to step 5 on the **same branch** (`fix:`/`refactor:` commits), then re-run the gates touched (full suite again only if contracts changed) and append a short rework entry to the memory log. Feedback that changes *scope* is not rework — it's a roadmap edit, agreed with the user first.
-- **No user available** (headless, CI, subagent run): anything that is merely an *offer* — companion installs, `/graphify .`, model-switch suggestions — is skipped silently and the run continues. Anything that requires a *decision* — interview answers, plan approval, drift resolution, scope or dependency sign-off — is never invented: record the questions and take the PARKED path.
+- **Rework after review.** Review feedback returns to step 5 on the **same branch** (`fix:`/`refactor:` commits). Re-run the unit and integration tests for the changed files; run the full suite *only if core contracts changed*. Append a short rework entry to the memory log. Feedback that changes *scope* is not rework — it's a roadmap edit, agreed with the user first.
+- **No user available** (headless, CI, subagent run): anything that is merely an *offer* — companion installs, `/graphify .`, model-switch suggestions — is skipped silently and the run continues. Anything that requires a *decision* — interview answers, plan approval, drift resolution, scope or dependency sign-off — is never invented: record the questions and take the PARKED path. *In Bootstrap mode, if no user is available for the interview, produce a minimal doc skeleton with `<!-- TODO(interview) -->` markers and park (see Bootstrap step 2).*
 - **Recurring feedback is a process bug.** If the same correction shows up in two milestones, encode it — into a gate, a doc rule, or this skill — instead of repeating it in chat.
 
 ## Scaling to a team
@@ -111,5 +164,5 @@ The same doc set onboards a human: AGENTS.md + roadmap + memory log is the readi
 
 ## Output
 
-- **Bootstrap mode:** an approved doc set (briefing, roadmap, phase docs, tech decisions, seeded memory log) plus the saved bootstrap brief — enough that Execute mode runs without guessing.
-- **Execute mode:** a review-ready branch — all milestone tasks implemented (minimally, if ponytail is present), all gates green (or honestly reported), reviews run, app booted and exercised, memory log updated, and a short handover report in the exact shape of step 9.
+- **Bootstrap mode:** an approved doc set (briefing, roadmap, phase docs, tech decisions, seeded memory log) plus the saved bootstrap brief — enough that Execute mode runs without guessing. In headless mode, a minimal skeleton with TODO markers and a PARKED entry explaining the gaps.
+- **Execute mode:** a review-ready branch — all milestone tasks implemented (minimally, if ponytail is present), all gates green (or honestly reported), reviews run, app booted and exercised (or honestly reported as not-verified), memory log updated with the template, and a short handover report in the exact shape of step 9.
